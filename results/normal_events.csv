@@ -2,9 +2,9 @@ start_time,time,duration,event,user_id,token_index,tokens_processed
 0.0,0.0,0.0,request_arrival,NewPrompt,,0
 0.0,4.0,4.0,prefill,NewPrompt,,4000
 4.0,4.0,0.0,prefill_complete,NewPrompt,,0
-4.0,4.05,0.05,decode_token,DecodeUser1,1.0,1
-4.05,4.1,0.05,decode_token,DecodeUser2,1.0,1
-4.1,4.1499999999999995,0.05,decode_token,NewPrompt,1.0,1
+4.0,4.05,0.05,decode_token,NewPrompt,1.0,1
+4.05,4.1,0.05,decode_token,DecodeUser1,1.0,1
+4.1,4.1499999999999995,0.05,decode_token,DecodeUser2,1.0,1
 4.1499999999999995,4.199999999999999,0.05,decode_token,DecodeUser1,2.0,1
 4.199999999999999,4.249999999999999,0.05,decode_token,DecodeUser2,2.0,1
 4.249999999999999,4.299999999999999,0.05,decode_token,DecodeUser1,3.0,1

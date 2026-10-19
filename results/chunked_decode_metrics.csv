@@ -1,3 +1,3 @@
 user_id,first_decode_token_latency,average_inter_token_latency,generated_tokens
 DecodeUser1,0.555,0.2886842105263155,20
-DecodeUser2,0.6050000000000001,0.28868421052631543,20
+DecodeUser2,0.6050000000000001,0.2886842105263155,20

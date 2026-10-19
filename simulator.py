@@ -30,36 +30,31 @@ def run_experiment(
     chunk_overhead=0.005,
 ):
     """
-    Simulate normal and chunked prefill scheduling.
+    Simplified discrete-event model of normal and chunked prefill.
 
-    Model assumptions:
-    - One shared processing resource.
-    - One new prompt arrives at simulation time zero.
-    - Existing decode requests are ready for their next token.
-    - Prefill processing time is proportional to prompt length.
-    - Every decode token takes a fixed amount of simulated time.
-    - Normal prefill processes the complete prompt first.
-    - Chunked prefill interleaves prefill chunks with decode rounds.
-    - Chunk overhead represents configurable scheduling overhead.
-
-    This is a scheduling simulation, not a GPU performance predictor.
+    Assumptions:
+    - One shared, single-capacity processing resource.
+    - One new prompt arrives at time zero.
+    - Existing decode requests are ready at time zero.
+    - Prefill duration is proportional to prompt length.
+    - Decode operations have fixed duration.
+    - Normal prefill is one non-preemptive operation.
+    - Chunked prefill releases the resource after each chunk.
+    - Existing decode requests are offered service between chunks.
+    - This is a scheduling simulation, not a GPU benchmark.
     """
 
     if mode not in ("normal", "chunked"):
         raise ValueError("mode must be 'normal' or 'chunked'")
 
     if prompt_length <= 0 or processing_rate <= 0:
-        raise ValueError(
-            "Prompt length and processing rate must be positive"
-        )
+        raise ValueError("Prompt length and processing rate must be positive")
 
     if chunk_size <= 0:
         raise ValueError("Chunk size must be positive")
 
     if decode_users < 0 or output_tokens < 0:
-        raise ValueError(
-            "Decode users and output tokens cannot be negative"
-        )
+        raise ValueError("Decode users and output tokens cannot be negative")
 
     if decode_time <= 0:
         raise ValueError("Decode time must be positive")
@@ -68,24 +63,22 @@ def run_experiment(
         raise ValueError("Chunk overhead cannot be negative")
 
     env = simpy.Environment()
+    compute = simpy.Resource(env, capacity=1)
 
     events = []
-    token_times = {}
-    prefill_completion = None
-    new_prompt_first_token_time = None
+    token_times = {"NewPrompt": []}
 
     active_users = [
-        f"DecodeUser{i + 1}"
-        for i in range(decode_users)
+        f"DecodeUser{i + 1}" for i in range(decode_users)
     ]
-
-    generated = {user: 0 for user in active_users}
-
-    # Include the new request in token-level event recording.
-    token_times["NewPrompt"] = []
 
     for user in active_users:
         token_times[user] = []
+
+    generated = {user: 0 for user in active_users}
+
+    prefill_completion = None
+    new_prompt_first_token_time = None
 
     def execute_operation(
         event_name,
@@ -94,18 +87,14 @@ def run_experiment(
         token_index=None,
         tokens_processed=0,
     ):
-        """
-        Execute one operation on the simulated shared resource.
+        """Acquire the shared resource and execute one operation."""
 
-        The scheduler calls this generator sequentially, so only
-        one operation uses the resource at a time.
-        """
+        with compute.request() as request:
+            yield request
 
-        start_time = env.now
-
-        yield env.timeout(duration)
-
-        finish_time = env.now
+            start_time = env.now
+            yield env.timeout(duration)
+            finish_time = env.now
 
         events.append({
             "start_time": start_time,
@@ -121,7 +110,7 @@ def run_experiment(
             token_times[user_id].append(finish_time)
 
     def decode_one_token(user_id):
-        """Schedule and record one generated token."""
+        """Generate and record one output token."""
 
         token_index = len(token_times[user_id]) + 1
 
@@ -137,11 +126,7 @@ def run_experiment(
             generated[user_id] += 1
 
     def decode_round():
-        """
-        Give each existing user one decode opportunity.
-
-        Users are processed in round-robin order.
-        """
+        """Give each existing decode user one token opportunity."""
 
         for user in active_users:
             if generated[user] < output_tokens:
@@ -151,7 +136,6 @@ def run_experiment(
         nonlocal prefill_completion
         nonlocal new_prompt_first_token_time
 
-        # Record the arrival of the new request.
         events.append({
             "start_time": 0.0,
             "time": 0.0,
@@ -164,7 +148,7 @@ def run_experiment(
 
         if mode == "normal":
 
-            # Process the complete prompt as one operation.
+            # A single long, non-preemptive prefill operation.
             yield from execute_operation(
                 event_name="prefill",
                 user_id="NewPrompt",
@@ -174,29 +158,14 @@ def run_experiment(
 
             prefill_completion = env.now
 
-            events.append({
-                "start_time": env.now,
-                "time": env.now,
-                "duration": 0.0,
-                "event": "prefill_complete",
-                "user_id": "NewPrompt",
-                "token_index": None,
-                "tokens_processed": 0,
-            })
-
-            # Existing users are already waiting for decode work.
-            # Give them one round before the new prompt's first token.
-            yield from decode_round()
-
         else:
 
+            # The prompt is divided into independently scheduled chunks.
             remaining = prompt_length
 
             while remaining > 0:
-
                 current_chunk = min(chunk_size, remaining)
 
-                # Process one prefill chunk.
                 yield from execute_operation(
                     event_name="prefill_chunk",
                     user_id="NewPrompt",
@@ -209,33 +178,27 @@ def run_experiment(
 
                 remaining -= current_chunk
 
-                # Interleave decode work between chunks.
+                # Let existing requests compete between chunks.
                 if remaining > 0:
                     yield from decode_round()
 
-            # Record completion immediately after the final chunk.
             prefill_completion = env.now
 
-            events.append({
-                "start_time": env.now,
-                "time": env.now,
-                "duration": 0.0,
-                "event": "prefill_complete",
-                "user_id": "NewPrompt",
-                "token_index": None,
-                "tokens_processed": 0,
-            })
+        events.append({
+            "start_time": env.now,
+            "time": env.now,
+            "duration": 0.0,
+            "event": "prefill_complete",
+            "user_id": "NewPrompt",
+            "token_index": None,
+            "tokens_processed": 0,
+        })
 
-            # Existing decode requests remain active and get
-            # another decode round before the new prompt's first token.
-            yield from decode_round()
-
-        # Schedule the new prompt's first output token as a real event.
+        # Generate the new request's first output token.
         yield from decode_one_token("NewPrompt")
-
         new_prompt_first_token_time = env.now
 
-        # Finish remaining decode work for existing users.
+        # Complete the remaining output tokens of existing users.
         while any(
             generated[user] < output_tokens
             for user in active_users
@@ -252,7 +215,6 @@ def run_experiment(
     decode_metrics = []
 
     for user in active_users:
-
         times = token_times[user]
 
         inter_token_latencies = [
@@ -262,17 +224,13 @@ def run_experiment(
 
         decode_metrics.append({
             "user_id": user,
-
             "first_decode_token_latency": (
                 times[0] if times else 0.0
             ),
-
             "average_inter_token_latency": (
-                sum(inter_token_latencies)
-                / len(inter_token_latencies)
+                sum(inter_token_latencies) / len(inter_token_latencies)
                 if inter_token_latencies else 0.0
             ),
-
             "generated_tokens": len(times),
         })
 
@@ -287,63 +245,37 @@ def run_experiment(
     )
 
     total_decode_tokens = sum(
-        len(token_times[user])
-        for user in active_users
+        len(token_times[user]) for user in active_users
     )
 
-    new_prompt_output_tokens = len(
-        token_times["NewPrompt"]
-    )
+    new_prompt_output_tokens = len(token_times["NewPrompt"])
 
-    # Aggregate work includes prompt tokens and generated output tokens.
-    total_tokens = (
-        prompt_length
-        + total_decode_tokens
-        + new_prompt_output_tokens
-    )
+    total_output_tokens = total_decode_tokens + new_prompt_output_tokens
+
+    total_tokens = prompt_length + total_output_tokens
 
     simulation_time = env.now
 
-    # Output throughput counts generated tokens only.
-    total_output_tokens = (
-        total_decode_tokens + new_prompt_output_tokens
-    )
-
     summary = {
         "mode": mode,
-
         "prompt_length": prompt_length,
-
-        "chunk_size": (
-            chunk_size if mode == "chunked" else prompt_length
-        ),
-
+        "chunk_size": chunk_size if mode == "chunked" else prompt_length,
         "prefill_completion_time": prefill_completion,
-
-        # Measured from the completion of an actual decode event.
         "new_prompt_ttft": new_prompt_first_token_time,
-
         "average_decode_first_token_latency": (
             decode_df["first_decode_token_latency"].mean()
             if not decode_df.empty else 0.0
         ),
-
         "average_inter_token_latency": (
             decode_df["average_inter_token_latency"].mean()
             if not decode_df.empty else 0.0
         ),
-
         "total_decode_tokens": total_decode_tokens,
-
         "new_prompt_output_tokens": new_prompt_output_tokens,
-
         "simulation_time": simulation_time,
-
         "aggregate_token_throughput": (
-            total_tokens / simulation_time
-            if simulation_time > 0 else 0.0
+            total_tokens / simulation_time if simulation_time > 0 else 0.0
         ),
-
         "output_token_throughput": (
             total_output_tokens / simulation_time
             if simulation_time > 0 else 0.0
@@ -381,29 +313,22 @@ if __name__ == "__main__":
     print("=" * 100)
     print(chunked_decode.to_string(index=False))
 
-    comparison.to_csv(
-        "results/decode_comparison.csv",
-        index=False,
-    )
+    comparison.to_csv("results/decode_comparison.csv", index=False)
 
     pd.DataFrame(normal_events).to_csv(
-        "results/normal_events.csv",
-        index=False,
+        "results/normal_events.csv", index=False
     )
 
     pd.DataFrame(chunked_events).to_csv(
-        "results/chunked_events.csv",
-        index=False,
+        "results/chunked_events.csv", index=False
     )
 
     normal_decode.to_csv(
-        "results/normal_decode_metrics.csv",
-        index=False,
+        "results/normal_decode_metrics.csv", index=False
     )
 
     chunked_decode.to_csv(
-        "results/chunked_decode_metrics.csv",
-        index=False,
+        "results/chunked_decode_metrics.csv", index=False
     )
 
     print("\nAll results saved in the results/ directory.")
